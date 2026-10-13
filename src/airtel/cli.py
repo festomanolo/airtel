@@ -385,10 +385,10 @@ def cmd_stop(_args: argparse.Namespace) -> None:
         return
     if _pid_alive(pid):
         os.kill(pid, signal.SIGTERM)
-        print(f"Stopped (pid {pid}).")
+        ui.ok(f"Watchdog stopped [dim](pid {pid})[/dim]")
     else:
-        print("Not running (stale pid file cleared).")
-    settings.PID_FILE.unlink()
+        ui.info_line("Not running (stale pid file cleared).")
+    settings.PID_FILE.unlink(missing_ok=True)
 
 
 def cmd_logs() -> None:
