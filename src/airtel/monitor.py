@@ -18,7 +18,7 @@ import sys
 import time
 from typing import Optional
 
-from . import settings
+from . import history, settings
 from .router_client import RouterAPIError, RouterAuthError, RouterClient
 
 logging.basicConfig(
@@ -29,7 +29,11 @@ logging.basicConfig(
 log = logging.getLogger("monitor")
 
 
-def check_connection(target: str, timeout_s: int = 3) -> bool:
+_RTT_RE = re.compile(r"time[=<]([\d.]+)")
+
+
+def ping_rtt(target: str, timeout_s: int = 3) -> Optional[float]:
+    """Round-trip time in ms, or None if the ping failed."""
     try:
         subprocess.run(
             ["ping", "-c", "1", "-W" if sys.platform != "darwin" else "-t", str(timeout_s), target],
