@@ -118,3 +118,44 @@ class DryRunBackend:
     def revoke(self, mac: str) -> None:
         self.allowed.discard(mac)
 
+
+class RouterBackend:
+    """Live router. Reading SMS is read-only; allow/revoke write router config
+    and stay disabled until the real MAC-filter request is captured (see
+    docs/mac-whitelist.md) and implemented below."""
+
+    def __init__(self, client: Any) -> None:
+        self.client = client
+
+    def inbox(self) -> list[dict[str, Any]]:
+        from .router_client import CMD_SMS_INFO
+        return extract_messages(self.client.call(CMD_SMS_INFO, method="GET"))
+
+    def allow(self, mac: str) -> None:
+        raise BackendUnverified("MAC_FILTER (cmd 23) write payload not captured yet")
+
+    def revoke(self, mac: str) -> None:
+        raise BackendUnverified("MAC_FILTER (cmd 23) write payload not captured yet")
+
+
+def extract_messages(resp: dict[str, Any]) -> list[dict[str, Any]]:
+    """Best-effort: find the message list in an SMS_INFO response whatever it
+    is called, and map common field names onto {sender, body, ts}. Unverified
+    against a live inbox; `airtel probe 12` shows the real shape."""
+    lists = [v for v in resp.values() if isinstance(v, list) and v and isinstance(v[0], dict)]
+    out = []
+    for item in (lists[0] if lists else []):
+        pick = lambda *keys: next((str(item[k]) for k in keys if k in item), "")  # noqa: E731
+        out.append({
+            "sender": pick("phone", "number", "from", "sender", "address"),
+            "body": pick("content", "body", "msg", "message", "text"),
+            "ts": pick("time", "date", "ts", "timestamp"),
+        })
+    return out
+
+
+# ---------------------------------------------------------------- store
+
+class Store:
+    def __init__(self, path: Path | str) -> None:
+        if str(path) != ":memory:":
