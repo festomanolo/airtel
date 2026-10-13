@@ -115,3 +115,42 @@ def cmd_run(args: argparse.Namespace) -> None:
                 if rep.errors:
                     sys.exit(1)
             if args.once:
+                return
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        pass
+
+
+def register(sub: Any) -> None:
+    pr = sub.add_parser("probe")
+    pr.add_argument("cmd", type=int)
+    pr.add_argument("params", nargs="*", help="extra key=value fields")
+    pr.set_defaults(fn=cmd_probe)
+
+    b = sub.add_parser("billing").add_subparsers(dest="bill_action", required=True)
+    pl = b.add_parser("plan")
+    pls = pl.add_subparsers(dest="op", required=True)
+    add = pls.add_parser("add")
+    add.add_argument("name")
+    add.add_argument("price", type=float)
+    add.add_argument("minutes", type=int)
+    pls.add_parser("list")
+    pl.set_defaults(fn=cmd_plan)
+
+    cu = b.add_parser("customer")
+    cu.add_argument("phone")
+    cu.add_argument("mac")
+    cu.add_argument("--name", default="")
+    cu.set_defaults(fn=cmd_customer)
+
+    pa = b.add_parser("parse")
+    pa.add_argument("sms")
+    pa.set_defaults(fn=cmd_parse)
+
+    b.add_parser("payments").set_defaults(fn=cmd_payments)
+
+    ru = b.add_parser("run")
+    ru.add_argument("--interval", type=float, default=15.0)
+    ru.add_argument("--once", action="store_true")
+    ru.add_argument("--dry-run", action="store_true", help="read SMS for real, don't change the allow-list")
+    ru.set_defaults(fn=cmd_run)
