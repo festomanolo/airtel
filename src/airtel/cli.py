@@ -319,12 +319,13 @@ def cmd_reconnect(_args: argparse.Namespace) -> None:
             ui.fail(f"Reconnect sent, but {settings.PING_TARGET} still isn't answering after {took}")
             sys.exit(1)
     except (RouterAuthError, RouterAPIError) as e:
-        sys.exit(f"Error: {e}")
+        ui.fail(str(e))
+        sys.exit(1)
     finally:
         client.logout()
 
 
-def cmd_reboot() -> None:
+def cmd_reboot(_args: argparse.Namespace) -> None:
     client = _client()
     try:
         client.login()
