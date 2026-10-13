@@ -15,8 +15,17 @@ import os
 import signal
 import subprocess
 import sys
+import time
+from collections import deque
+from typing import Any, Optional
 
-from . import settings
+from rich import box
+from rich.live import Live
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+
+from . import history, settings, ui
 from .router_client import RouterAPIError, RouterAuthError, RouterClient
 
 
