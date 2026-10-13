@@ -7,16 +7,17 @@ it calls the router's direct API to toggle the WAN/cellular connection
 checks. Falls back to a full reboot if the fast reconnect doesn't clear
 the outage after one retry cycle.
 
-Run it with: python monitor.py
-Stop it with Ctrl+C.
+Normally launched via `airtel` (background) or `airtel foreground`
+(attached, for debugging). Stop the background one with `airtel stop`,
+or Ctrl+C when running in the foreground.
 """
 import logging
 import subprocess
 import sys
 import time
 
-import config
-from router_client import RouterAPIError, RouterAuthError, RouterClient
+from . import settings
+from .router_client import RouterAPIError, RouterAuthError, RouterClient
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,43 +55,43 @@ def recover(client: RouterClient, escalate: bool) -> None:
 
 
 def monitor_loop() -> None:
-    if not config.ROUTER_PASS:
-        sys.exit("ROUTER_PASS is not set. Copy .env.example to .env and fill it in.")
+    if not settings.is_configured():
+        sys.exit("Not configured yet. Run `airtel init` first.")
 
     client = RouterClient(
-        base_url=config.ROUTER_URL,
-        username=config.ROUTER_USER,
-        password=config.ROUTER_PASS,
+        base_url=settings.ROUTER_URL,
+        username=settings.ROUTER_USER,
+        password=settings.ROUTER_PASS,
     )
 
     consecutive_failures = 0
     last_action_escalated = False
     log.info(
         "Monitoring %s every %ss (threshold=%s failures)",
-        config.PING_TARGET,
-        config.CHECK_INTERVAL_SECONDS,
-        config.FAIL_THRESHOLD,
+        settings.PING_TARGET,
+        settings.CHECK_INTERVAL_SECONDS,
+        settings.FAIL_THRESHOLD,
     )
 
     while True:
-        if check_connection(config.PING_TARGET):
+        if check_connection(settings.PING_TARGET):
             if consecutive_failures:
                 log.info("Connection recovered.")
             consecutive_failures = 0
         else:
             consecutive_failures += 1
-            log.info("Ping failed (%s/%s)", consecutive_failures, config.FAIL_THRESHOLD)
+            log.info("Ping failed (%s/%s)", consecutive_failures, settings.FAIL_THRESHOLD)
 
-        if consecutive_failures >= config.FAIL_THRESHOLD:
+        if consecutive_failures >= settings.FAIL_THRESHOLD:
             try:
                 recover(client, escalate=last_action_escalated)
                 last_action_escalated = not last_action_escalated
             except (RouterAuthError, RouterAPIError) as e:
                 log.error("Recovery action failed: %s", e)
             consecutive_failures = 0
-            time.sleep(config.RECOVERY_GRACE_SECONDS)
+            time.sleep(settings.RECOVERY_GRACE_SECONDS)
 
-        time.sleep(config.CHECK_INTERVAL_SECONDS)
+        time.sleep(settings.CHECK_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":

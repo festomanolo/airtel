@@ -43,11 +43,19 @@ for Airtel support.
   bare board underneath it).
 
 ## What's implemented here
-- `router_client.py` — direct JSON-API client (login, live status,
-  WAN reconnect, reboot). Faster and more robust than DOM-clicking a
-  headless browser, since the full request/response shape is known.
-- `cli.py` — one-off commands: `status`, `reconnect`, `reboot`.
-- `monitor.py` — autonomous ping-based health daemon; after
+Packaged as an installable CLI (`pipx install .` / `pip install .`) that
+puts an `airtel` command on `$PATH` — see `pyproject.toml` for the
+`src/` layout and entry point.
+
+- `src/airtel/router_client.py` — direct JSON-API client (login, live
+  status, WAN reconnect, reboot). Faster and more robust than DOM-clicking
+  a headless browser, since the full request/response shape is known.
+- `src/airtel/cli.py` — the `airtel` entry point: `init` (interactive
+  setup wizard, verifies login before saving), bare `airtel` (start the
+  monitor detached in the background, pid-tracked), `stop`, `logs`,
+  `foreground` (attached, for debugging), plus one-off `status` /
+  `reconnect` / `reboot`.
+- `src/airtel/monitor.py` — the autonomous ping-based health loop; after
   `FAIL_THRESHOLD` consecutive ping misses it triggers a fast WAN toggle,
   and escalates to a full reboot if the *next* outage isn't cleared by a
   toggle alone.
@@ -56,8 +64,14 @@ for Airtel support.
   that doc for why and how to extend `router_client.py` later).
 
 ## Working conventions for this repo
-- Credentials live in `.env` (gitignored), loaded via `config.py`. Never
-  hardcode the router password in a committed file.
+- Config is per-user, not per-project: `airtel init` writes credentials to
+  `~/.config/airtel/.env` (mode 600), loaded via `src/airtel/settings.py`.
+  Nothing in the repo defaults to any specific person's router password —
+  `ROUTER_URL`/`ROUTER_USER` fall back to the firmware's own generic
+  defaults (`192.168.1.1`/`admin`), `ROUTER_PASS` has no default. Never
+  hardcode a real password in a committed file; a local `.env` in the repo
+  root still works for development (gitignored) but ship-facing config
+  lives outside the repo.
 - Prefer extending `router_client.py` with new `cmd`-based methods over
   adding browser automation (Playwright/Selenium) — the API is already
   mapped and is an order of magnitude faster/more reliable than simulating
