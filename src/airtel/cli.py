@@ -356,9 +356,9 @@ def cmd_start_background(_args: argparse.Namespace) -> None:
     pid = _read_pid()
     if pid is not None:
         if _pid_alive(pid):
-            print(f"Already running (pid {pid}). Run `airtel stop` first to restart it.")
+            ui.info_line(f"Already running (pid {pid}). Run [bold]airtel stop[/bold] first to restart it.")
             return
-        settings.PID_FILE.unlink()
+        settings.PID_FILE.unlink(missing_ok=True)
 
     log_fh = open(settings.LOG_FILE, "a")
     proc = subprocess.Popen(
