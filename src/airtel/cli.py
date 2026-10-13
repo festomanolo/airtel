@@ -370,16 +370,19 @@ def cmd_start_background(_args: argparse.Namespace) -> None:
         close_fds=True,
     )
     settings.PID_FILE.write_text(str(proc.pid))
-    print(f"Started in background (pid {proc.pid}).")
-    print(f"Logs: airtel logs   (or tail -f {settings.LOG_FILE})")
-    print("Stop with: airtel stop")
+    ui.ok(f"Watchdog started in the background [dim](pid {proc.pid})[/dim]")
+    ui.info_line(
+        f"Pinging [bold]{settings.PING_TARGET}[/bold] every {settings.CHECK_INTERVAL_SECONDS}s; "
+        f"recovers after {settings.FAIL_THRESHOLD} misses."
+    )
+    console.print("  [dim]airtel status · airtel logs · airtel stop[/dim]")
 
 
-def cmd_stop() -> None:
-    if not settings.PID_FILE.exists():
-        print("Not running.")
+def cmd_stop(_args: argparse.Namespace) -> None:
+    pid = _read_pid()
+    if pid is None:
+        ui.info_line("Not running.")
         return
-    pid = int(settings.PID_FILE.read_text().strip())
     if _pid_alive(pid):
         os.kill(pid, signal.SIGTERM)
         print(f"Stopped (pid {pid}).")
