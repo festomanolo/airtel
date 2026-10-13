@@ -76,3 +76,42 @@ def cmd_payments(_args: argparse.Namespace) -> None:
 
 
 class _DryRouter:
+    """Reads the real SMS inbox; only prints allow/revoke instead of applying."""
+
+    def __init__(self, real: Any) -> None:
+        self.real = real
+
+    def inbox(self) -> list[dict[str, Any]]:
+        return self.real.inbox()
+
+    def allow(self, mac: str) -> None:
+        console.print(f"[dim]dry-run allow  {mac}[/dim]")
+
+    def revoke(self, mac: str) -> None:
+        console.print(f"[dim]dry-run revoke {mac}[/dim]")
+
+
+def cmd_run(args: argparse.Namespace) -> None:
+    from .cli import _client
+
+    store = _store()
+    client = _client()
+    real = billing.RouterBackend(client)
+    backend = _DryRouter(real) if args.dry_run else real
+    try:
+        while True:
+            try:
+                client.login()
+                rep = billing.tick(store, backend)
+                client.logout()
+            except (RouterAuthError, RouterAPIError, OSError) as e:
+                ui.fail(f"router: {e}")
+                client.session_id = None
+            else:
+                if rep.granted or rep.unmatched or rep.revoked:
+                    ui.ok(f"granted {len(rep.granted)} · unmatched {len(rep.unmatched)} · expired {len(rep.revoked)}")
+                for err in rep.errors:
+                    ui.fail(err)
+                if rep.errors:
+                    sys.exit(1)
+            if args.once:
