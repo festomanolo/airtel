@@ -2,20 +2,13 @@
 """airtel — background auto-recovery for Tozed/ZLT-style router web UIs
 (e.g. an Airtel-branded ZLT X25).
 
-Usage:
-    airtel              Start the health-monitor daemon in the background
-    airtel stop         Stop the background daemon
-    airtel foreground   Run the monitor attached, for debugging (Ctrl+C to stop)
-    airtel status       Print live router status as JSON
-    airtel reconnect    One-off fast WAN/cellular toggle (~10s)
-    airtel reboot       One-off full device reboot (~60-90s)
-    airtel init         Interactive setup: your router's IP, username, password
-    airtel logs         Tail the background daemon's log
+Run `airtel help` for the command list.
 
 Config is per-user, not per-project: `airtel init` writes to
 ~/.config/airtel/.env (override the directory with AIRTEL_CONFIG_DIR).
 Nothing here ships with anyone's real router password baked in.
 """
+import argparse
 import getpass
 import json
 import os
