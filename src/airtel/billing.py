@@ -159,3 +159,43 @@ def extract_messages(resp: dict[str, Any]) -> list[dict[str, Any]]:
 class Store:
     def __init__(self, path: Path | str) -> None:
         if str(path) != ":memory:":
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+        self.db = sqlite3.connect(str(path))
+        self.db.row_factory = sqlite3.Row
+        self.db.executescript(SCHEMA)
+
+    # plans
+    def add_plan(self, name: str, price: float, minutes: int) -> None:
+        self.db.execute("INSERT OR REPLACE INTO plans VALUES (?,?,?)", (name, price, minutes))
+        self.db.commit()
+
+    def plans(self) -> list[sqlite3.Row]:
+        return self.db.execute("SELECT * FROM plans ORDER BY price").fetchall()
+
+    def plan_for(self, amount: float) -> Optional[sqlite3.Row]:
+        """Exact price match only: no guessing when a customer under/over-pays."""
+        return self.db.execute("SELECT * FROM plans WHERE price=?", (amount,)).fetchone()
+
+    # customers / devices
+    def add_customer(self, phone: str, mac: str, name: str = "") -> None:
+        p = normalize_phone(phone)
+        if not p:
+            raise ValueError(f"bad phone number: {phone!r}")
+        self.db.execute("INSERT OR IGNORE INTO customers(phone,name) VALUES (?,?)", (p, name))
+        self.db.execute("INSERT OR REPLACE INTO devices VALUES (?,?)", (normalize_mac(mac), p))
+        self.db.commit()
+
+    def macs_for(self, phone: str) -> list[str]:
+        return [r["mac"] for r in self.db.execute("SELECT mac FROM devices WHERE phone=?", (phone,))]
+
+    def customer_exists(self, phone: str) -> bool:
+        return self.db.execute("SELECT 1 FROM customers WHERE phone=?", (phone,)).fetchone() is not None
+
+    # sessions
+    def extend(self, phone: str, minutes: int, now: float) -> float:
+        row = self.db.execute("SELECT expires_at FROM sessions WHERE phone=?", (phone,)).fetchone()
+        base = max(now, row["expires_at"]) if row else now
+        expires = base + minutes * 60
+        self.db.execute("INSERT OR REPLACE INTO sessions VALUES (?,?)", (phone, expires))
+        self.db.commit()
+        return expires
