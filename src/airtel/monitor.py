@@ -35,10 +35,10 @@ _RTT_RE = re.compile(r"time[=<]([\d.]+)")
 def ping_rtt(target: str, timeout_s: int = 3) -> Optional[float]:
     """Round-trip time in ms, or None if the ping failed."""
     try:
-        subprocess.run(
+        out = subprocess.run(
             ["ping", "-c", "1", "-W" if sys.platform != "darwin" else "-t", str(timeout_s), target],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
             check=True,
             timeout=timeout_s + 2,
         )
