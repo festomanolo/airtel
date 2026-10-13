@@ -349,13 +349,12 @@ def cmd_foreground(_args: argparse.Namespace) -> None:
         pass
 
 
-def cmd_start_background() -> None:
-    if not settings.is_configured():
-        sys.exit("Not configured yet. Run `airtel init` first.")
+def cmd_start_background(_args: argparse.Namespace) -> None:
+    _need_config()
     settings.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
-    if settings.PID_FILE.exists():
-        pid = int(settings.PID_FILE.read_text().strip())
+    pid = _read_pid()
+    if pid is not None:
         if _pid_alive(pid):
             print(f"Already running (pid {pid}). Run `airtel stop` first to restart it.")
             return
