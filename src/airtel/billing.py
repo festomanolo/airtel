@@ -1,0 +1,282 @@
+"""Pay-by-SMS access control for the router's Wi-Fi.
+
+Flow: a customer pays mobile money to the SIM in the router -> the provider's
+confirmation SMS lands in the router's inbox -> we parse amount, payer phone
+and transaction id -> if the phone is registered to one or more device MACs,
+those MACs are allowed on the router until the paid time runs out.
+
+This module is router-agnostic: all router I/O goes through a `Backend`
+(inbox / allow / revoke), so the whole flow is testable offline.
+
+Security notes:
+  * Anyone can text the SIM a fake "you have received..." message. Only SMS
+    from `trusted_senders` (the provider's alphanumeric sender id) count.
+  * Each transaction id is honoured once (replay protection).
+  * Amount must match a plan; short payments are recorded but grant nothing.
+"""
+from __future__ import annotations
+
+import hashlib
+import re
+import sqlite3
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Iterable, Optional, Protocol
+
+DEFAULT_TRUSTED_SENDERS = ("AIRTELMONEY", "MPESA", "M-PESA", "TIGOPESA", "HALOPESA", "TTCLMOBILE")
+
+# Deliberately loose; real provider formats vary. Override per deployment by
+# passing your own patterns to `parse_payment`. Verify against real SMS first
+# (`airtel billing parse "<sms text>"`).
+AMOUNT_RE = re.compile(r"(?:TSh|TZS|Tsh|TShs)\.?\s*([\d,]+(?:\.\d+)?)", re.I)
+PHONE_RE = re.compile(r"(\+?255\d{9}|\b0\d{9}\b)")
+TXN_RE = re.compile(r"(?:Trans(?:action)?\s*(?:ID|Id|No)|TxnId|Txn\s*ID|Ref(?:erence)?(?:\s*No)?)\s*[:#]?\s*([A-Z0-9]{6,})", re.I)
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS plans (
+    name TEXT PRIMARY KEY, price REAL NOT NULL, minutes INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS customers (
+    phone TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS devices (
+    mac TEXT PRIMARY KEY, phone TEXT NOT NULL REFERENCES customers(phone));
+CREATE TABLE IF NOT EXISTS payments (
+    txn TEXT PRIMARY KEY, phone TEXT NOT NULL, amount REAL NOT NULL, ts REAL NOT NULL,
+    plan TEXT, status TEXT NOT NULL, raw TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS sessions (
+    phone TEXT PRIMARY KEY, expires_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS sms_seen (key TEXT PRIMARY KEY);
+"""
+
+
+# ---------------------------------------------------------------- parsing
+
+def normalize_phone(raw: str) -> Optional[str]:
+    """Return a Tanzanian number as 255XXXXXXXXX, or None if it doesn't fit."""
+    digits = re.sub(r"\D", "", raw or "")
+    if len(digits) == 10 and digits.startswith("0"):
+        digits = "255" + digits[1:]
+    return digits if len(digits) == 12 and digits.startswith("255") else None
+
+
+def normalize_mac(raw: str) -> str:
+    hexes = re.sub(r"[^0-9a-fA-F]", "", raw or "")
+    if len(hexes) != 12:
+        raise ValueError(f"not a MAC address: {raw!r}")
+    return ":".join(hexes[i:i + 2] for i in range(0, 12, 2)).upper()
+
+
+@dataclass
+class Payment:
+    txn: str
+    phone: str
+    amount: float
+    raw: str
+
+
+def parse_payment(body: str) -> Optional[Payment]:
+    """Extract (txn, payer phone, amount) from a received-money SMS, or None."""
+    low = body.lower()
+    if not any(w in low for w in ("received", "umepokea", "imepokelewa", "deposit", "credited")):
+        return None
+    amount = AMOUNT_RE.search(body)
+    txn = TXN_RE.search(body)
+    if not (amount and txn):
+        return None
+    phone = next((p for m in PHONE_RE.findall(body) if (p := normalize_phone(m))), None)
+    if not phone:
+        return None
+    return Payment(txn=txn.group(1).upper(), phone=phone,
+                   amount=float(amount.group(1).replace(",", "")), raw=body)
+
+
+# ---------------------------------------------------------------- backends
+
+class Backend(Protocol):
+    def inbox(self) -> list[dict[str, Any]]: ...   # [{sender, body, ts}]
+    def allow(self, mac: str) -> None: ...
+    def revoke(self, mac: str) -> None: ...
+
+
+class BackendUnverified(RuntimeError):
+    """The router request for this action hasn't been captured yet."""
+
+
+class DryRunBackend:
+    """In-memory backend: records what would happen. Used for tests/`--dry-run`."""
+
+    def __init__(self, messages: Iterable[dict[str, Any]] = ()) -> None:
+        self.messages = list(messages)
+        self.allowed: set[str] = set()
+
+    def inbox(self) -> list[dict[str, Any]]:
+        return list(self.messages)
+
+    def allow(self, mac: str) -> None:
+        self.allowed.add(mac)
+
+    def revoke(self, mac: str) -> None:
+        self.allowed.discard(mac)
+
+
+class RouterBackend:
+    """Live router. Reading SMS is read-only; allow/revoke write router config
+    and stay disabled until the real MAC-filter request is captured (see
+    docs/mac-whitelist.md) and implemented below."""
+
+    def __init__(self, client: Any) -> None:
+        self.client = client
+
+    def inbox(self) -> list[dict[str, Any]]:
+        from .router_client import CMD_SMS_INFO
+        return extract_messages(self.client.call(CMD_SMS_INFO, method="GET"))
+
+    def allow(self, mac: str) -> None:
+        raise BackendUnverified("MAC_FILTER (cmd 23) write payload not captured yet")
+
+    def revoke(self, mac: str) -> None:
+        raise BackendUnverified("MAC_FILTER (cmd 23) write payload not captured yet")
+
+
+def extract_messages(resp: dict[str, Any]) -> list[dict[str, Any]]:
+    """Best-effort: find the message list in an SMS_INFO response whatever it
+    is called, and map common field names onto {sender, body, ts}. Unverified
+    against a live inbox; `airtel probe 12` shows the real shape."""
+    lists = [v for v in resp.values() if isinstance(v, list) and v and isinstance(v[0], dict)]
+    out = []
+    for item in (lists[0] if lists else []):
+        pick = lambda *keys: next((str(item[k]) for k in keys if k in item), "")  # noqa: E731
+        out.append({
+            "sender": pick("phone", "number", "from", "sender", "address"),
+            "body": pick("content", "body", "msg", "message", "text"),
+            "ts": pick("time", "date", "ts", "timestamp"),
+        })
+    return out
+
+
+# ---------------------------------------------------------------- store
+
+class Store:
+    def __init__(self, path: Path | str) -> None:
+        if str(path) != ":memory:":
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+        self.db = sqlite3.connect(str(path))
+        self.db.row_factory = sqlite3.Row
+        self.db.executescript(SCHEMA)
+
+    # plans
+    def add_plan(self, name: str, price: float, minutes: int) -> None:
+        self.db.execute("INSERT OR REPLACE INTO plans VALUES (?,?,?)", (name, price, minutes))
+        self.db.commit()
+
+    def plans(self) -> list[sqlite3.Row]:
+        return self.db.execute("SELECT * FROM plans ORDER BY price").fetchall()
+
+    def plan_for(self, amount: float) -> Optional[sqlite3.Row]:
+        """Exact price match only: no guessing when a customer under/over-pays."""
+        return self.db.execute("SELECT * FROM plans WHERE price=?", (amount,)).fetchone()
+
+    # customers / devices
+    def add_customer(self, phone: str, mac: str, name: str = "") -> None:
+        p = normalize_phone(phone)
+        if not p:
+            raise ValueError(f"bad phone number: {phone!r}")
+        self.db.execute("INSERT OR IGNORE INTO customers(phone,name) VALUES (?,?)", (p, name))
+        self.db.execute("INSERT OR REPLACE INTO devices VALUES (?,?)", (normalize_mac(mac), p))
+        self.db.commit()
+
+    def macs_for(self, phone: str) -> list[str]:
+        return [r["mac"] for r in self.db.execute("SELECT mac FROM devices WHERE phone=?", (phone,))]
+
+    def customer_exists(self, phone: str) -> bool:
+        return self.db.execute("SELECT 1 FROM customers WHERE phone=?", (phone,)).fetchone() is not None
+
+    # sessions
+    def extend(self, phone: str, minutes: int, now: float) -> float:
+        row = self.db.execute("SELECT expires_at FROM sessions WHERE phone=?", (phone,)).fetchone()
+        base = max(now, row["expires_at"]) if row else now
+        expires = base + minutes * 60
+        self.db.execute("INSERT OR REPLACE INTO sessions VALUES (?,?)", (phone, expires))
+        self.db.commit()
+        return expires
+
+    def active_phones(self, now: float) -> set[str]:
+        return {r["phone"] for r in self.db.execute("SELECT phone FROM sessions WHERE expires_at>?", (now,))}
+
+    def all_session_phones(self) -> set[str]:
+        return {r["phone"] for r in self.db.execute("SELECT phone FROM sessions")}
+
+
+# ---------------------------------------------------------------- engine
+
+@dataclass
+class TickReport:
+    granted: list[str] = field(default_factory=list)
+    unmatched: list[str] = field(default_factory=list)
+    ignored: int = 0
+    revoked: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+
+def _msg_key(m: dict[str, Any]) -> str:
+    return hashlib.sha256(f"{m.get('sender')}|{m.get('ts')}|{m.get('body')}".encode()).hexdigest()
+
+
+def tick(store: Store, backend: Backend, now: Optional[float] = None,
+         trusted_senders: Iterable[str] = DEFAULT_TRUSTED_SENDERS) -> TickReport:
+    """One pass: ingest new payment SMS, grant paid time, expire old sessions."""
+    now = time.time() if now is None else now
+    rep = TickReport()
+    trusted = {s.upper() for s in trusted_senders}
+
+    for m in backend.inbox():
+        key = _msg_key(m)
+        if store.db.execute("SELECT 1 FROM sms_seen WHERE key=?", (key,)).fetchone():
+            continue
+        store.db.execute("INSERT INTO sms_seen VALUES (?)", (key,))
+        pay = parse_payment(m.get("body", "")) if m.get("sender", "").upper() in trusted else None
+        if not pay:
+            rep.ignored += 1
+            continue
+        if store.db.execute("SELECT 1 FROM payments WHERE txn=?", (pay.txn,)).fetchone():
+            rep.ignored += 1  # replayed transaction id
+            continue
+        plan = store.plan_for(pay.amount)
+        if not plan:
+            status = "no-plan"
+        elif not store.customer_exists(pay.phone):
+            status = "unmatched"
+            rep.unmatched.append(pay.txn)
+        else:
+            status = "granted"
+            store.extend(pay.phone, plan["minutes"], now)
+            rep.granted.append(pay.txn)
+        store.db.execute("INSERT INTO payments VALUES (?,?,?,?,?,?,?)",
+                         (pay.txn, pay.phone, pay.amount, now, plan["name"] if plan else None, status, pay.raw))
+    store.db.commit()
+
+    active = store.active_phones(now)
+    for phone in store.all_session_phones():
+        for mac in store.macs_for(phone):
+            try:
+                (backend.allow if phone in active else backend.revoke)(mac)
+                if phone not in active:
+                    rep.revoked.append(mac)
+            except BackendUnverified as e:
+                rep.errors.append(str(e))
+                return rep
+    return rep
+
+
+def claim_unmatched(store: Store, phone: str, now: Optional[float] = None) -> int:
+    """After a customer registers, grant time for payments that arrived first."""
+    now = time.time() if now is None else now
+    n = 0
+    for r in store.db.execute("SELECT txn, plan FROM payments WHERE phone=? AND status='unmatched'", (phone,)).fetchall():
+        minutes = store.db.execute("SELECT minutes FROM plans WHERE name=?", (r["plan"],)).fetchone()
+        if minutes:
+            store.extend(phone, minutes["minutes"], now)
+            store.db.execute("UPDATE payments SET status='granted' WHERE txn=?", (r["txn"],))
+            n += 1
+    store.db.commit()
+    return n

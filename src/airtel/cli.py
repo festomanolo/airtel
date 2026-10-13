@@ -41,6 +41,8 @@ COMMANDS = [
     ("airtel logs", "Follow the watchdog log (-n N for history)"),
     ("airtel foreground", "Run the watchdog attached, for debugging"),
     ("airtel init", "Set the router address and credentials"),
+    ("airtel billing plan|customer|payments|run", "Pay-by-SMS access control (see docs/billing.md)"),
+    ("airtel probe <cmd>", "Read-only: print the raw JSON for a router command id"),
 ]
 
 
@@ -441,6 +443,10 @@ def _build_parser() -> argparse.ArgumentParser:
     lg = sub.add_parser("logs")
     lg.add_argument("-n", type=int, default=30, help="lines of history to show first")
     lg.set_defaults(fn=cmd_logs)
+
+    from . import billing_cli
+
+    billing_cli.register(sub)
     return p
 
 
