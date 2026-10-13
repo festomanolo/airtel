@@ -12,9 +12,11 @@ Normally launched via `airtel` (background) or `airtel foreground`
 or Ctrl+C when running in the foreground.
 """
 import logging
+import re
 import subprocess
 import sys
 import time
+from typing import Optional
 
 from . import settings
 from .router_client import RouterAPIError, RouterAuthError, RouterClient
