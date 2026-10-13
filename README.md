@@ -40,7 +40,9 @@ airtel              # start the background health-monitor daemon
 airtel stop          # stop it
 airtel logs           # tail its log
 
-airtel status         # one-off: live signal/connection JSON
+airtel status         # dashboard: signal gauges, latency + trend graphs, traffic
+airtel status --watch # live-refreshing dashboard (Ctrl+C to exit)
+airtel status --json  # raw router payload
 airtel reconnect      # one-off: fast WAN/cellular toggle (~10s)
 airtel reboot          # one-off: full reboot (~60-90s)
 
