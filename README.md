@@ -49,6 +49,11 @@ airtel reboot          # one-off: full reboot (~60-90s)
 airtel foreground       # run the monitor attached, for debugging
 ```
 
+The watchdog records ping latency and signal readings to
+`~/.config/airtel/history.jsonl` (6 h retention) so `airtel status` can draw
+trends without being left open. Signal sampling logs in to the router once a
+minute; set `SIGNAL_SAMPLE_SECONDS=0` in the config to disable it.
+
 Typing `airtel` with no arguments is the main entry point: it launches the
 health-check daemon detached from your terminal and returns immediately.
 It pings a target host (`PING_TARGET` in the config, default `8.8.8.8`) on
