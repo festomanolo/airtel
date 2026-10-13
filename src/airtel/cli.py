@@ -131,10 +131,11 @@ def cmd_init(_args: argparse.Namespace) -> None:
     )
     raw_url = console.input(f"[bold]Router URL or IP[/bold] [dim]\\[{settings.ROUTER_URL}][/dim]: ").strip()
     url = _normalize_url(raw_url) if raw_url else settings.ROUTER_URL
-    user = input(f"Username [{settings.ROUTER_USER}]: ").strip() or settings.ROUTER_USER
+    user = console.input(f"[bold]Username[/bold] [dim]\\[{settings.ROUTER_USER}][/dim]: ").strip() or settings.ROUTER_USER
     password = getpass.getpass("Password: ").strip()
     if not password:
-        sys.exit("A password is required.")
+        ui.fail("A password is required.")
+        sys.exit(1)
 
     print("Verifying login against the router before saving...")
     client = RouterClient(base_url=url, username=user, password=password)
