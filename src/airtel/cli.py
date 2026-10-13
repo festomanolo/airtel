@@ -28,10 +28,48 @@ from rich.text import Text
 from . import history, settings, ui
 from .router_client import RouterAPIError, RouterAuthError, RouterClient
 
+console = ui.console
+
+COMMANDS = [
+    ("airtel", "Start the watchdog in the background"),
+    ("airtel status", "Signal, cell, latency and traffic dashboard"),
+    ("airtel status --watch", "Live dashboard with moving graphs (Ctrl+C to exit)"),
+    ("airtel status --json", "Raw router payload as JSON"),
+    ("airtel reconnect", "Toggle the cellular link (~10 s)"),
+    ("airtel reboot", "Reboot the router (~60-90 s)"),
+    ("airtel stop", "Stop the background watchdog"),
+    ("airtel logs", "Follow the watchdog log (-n N for history)"),
+    ("airtel foreground", "Run the watchdog attached, for debugging"),
+    ("airtel init", "Set the router address and credentials"),
+]
+
+
+def _print_help() -> None:
+    t = Table.grid(padding=(0, 3))
+    t.add_column(style="bold cyan", no_wrap=True)
+    t.add_column()
+    for cmd, desc in COMMANDS:
+        t.add_row(cmd, desc)
+    console.print(
+        Panel(
+            t,
+            title=Text("airtel · router watchdog for Tozed/ZLT (Airtel X25)", style="bold"),
+            title_align="left",
+            border_style="grey50",
+            box=box.ROUNDED,
+            padding=(1, 2),
+        )
+    )
+
+
+def _need_config() -> None:
+    if not settings.is_configured():
+        ui.fail("Not configured yet. Run [bold]airtel init[/bold] first.")
+        sys.exit(1)
+
 
 def _client() -> RouterClient:
-    if not settings.is_configured():
-        sys.exit("Not configured yet. Run `airtel init` first.")
+    _need_config()
     return RouterClient(
         base_url=settings.ROUTER_URL,
         username=settings.ROUTER_USER,
@@ -45,6 +83,26 @@ def _pid_alive(pid: int) -> bool:
     except OSError:
         return False
     return True
+
+
+def _read_pid() -> Optional[int]:
+    try:
+        return int(settings.PID_FILE.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def daemon_info() -> dict[str, Any]:
+    pid = _read_pid()
+    if pid is None or not _pid_alive(pid):
+        return {"running": False}
+    events = [r for r in history.load(since=time.time() - 6 * 3600) if r.get("k") == "event"]
+    return {
+        "running": True,
+        "pid": pid,
+        "uptime": time.time() - settings.PID_FILE.stat().st_mtime,
+        "last_event": events[-1] if events else None,
+    }
 
 
 def _normalize_url(url: str) -> str:
