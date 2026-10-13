@@ -41,10 +41,35 @@ def ping_rtt(target: str, timeout_s: int = 3) -> Optional[float]:
             text=True,
             check=True,
             timeout=timeout_s + 2,
-        )
-        return True
+        ).stdout
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return False
+        return None
+    m = _RTT_RE.search(out)
+    return float(m.group(1)) if m else 0.0
+
+
+def check_connection(target: str, timeout_s: int = 3) -> bool:
+    return ping_rtt(target, timeout_s) is not None
+
+
+def sample_signal(client: RouterClient) -> None:
+    """Record one signal reading to the history file; never raises."""
+    try:
+        client.login()
+        try:
+            info = client.sys_info()
+        finally:
+            client.logout()
+    except Exception as e:  # noqa: BLE001 - sampling must never kill the daemon
+        log.debug("Signal sample failed: %s", e)
+        return
+    rec = {"k": "sig"}
+    for key in ("RSRP", "SINR", "RSRQ", "RSSI"):
+        try:
+            rec[key.lower()] = float(info.get(key, ""))
+        except ValueError:
+            pass
+    history.append(rec)
 
 
 def recover(client: RouterClient, escalate: bool) -> None:
