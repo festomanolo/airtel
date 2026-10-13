@@ -239,3 +239,44 @@ def tick(store: Store, backend: Backend, now: Optional[float] = None,
             rep.ignored += 1
             continue
         if store.db.execute("SELECT 1 FROM payments WHERE txn=?", (pay.txn,)).fetchone():
+            rep.ignored += 1  # replayed transaction id
+            continue
+        plan = store.plan_for(pay.amount)
+        if not plan:
+            status = "no-plan"
+        elif not store.customer_exists(pay.phone):
+            status = "unmatched"
+            rep.unmatched.append(pay.txn)
+        else:
+            status = "granted"
+            store.extend(pay.phone, plan["minutes"], now)
+            rep.granted.append(pay.txn)
+        store.db.execute("INSERT INTO payments VALUES (?,?,?,?,?,?,?)",
+                         (pay.txn, pay.phone, pay.amount, now, plan["name"] if plan else None, status, pay.raw))
+    store.db.commit()
+
+    active = store.active_phones(now)
+    for phone in store.all_session_phones():
+        for mac in store.macs_for(phone):
+            try:
+                (backend.allow if phone in active else backend.revoke)(mac)
+                if phone not in active:
+                    rep.revoked.append(mac)
+            except BackendUnverified as e:
+                rep.errors.append(str(e))
+                return rep
+    return rep
+
+
+def claim_unmatched(store: Store, phone: str, now: Optional[float] = None) -> int:
+    """After a customer registers, grant time for payments that arrived first."""
+    now = time.time() if now is None else now
+    n = 0
+    for r in store.db.execute("SELECT txn, plan FROM payments WHERE phone=? AND status='unmatched'", (phone,)).fetchall():
+        minutes = store.db.execute("SELECT minutes FROM plans WHERE name=?", (r["plan"],)).fetchone()
+        if minutes:
+            store.extend(phone, minutes["minutes"], now)
+            store.db.execute("UPDATE payments SET status='granted' WHERE txn=?", (r["txn"],))
+            n += 1
+    store.db.commit()
+    return n
