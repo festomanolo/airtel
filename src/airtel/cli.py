@@ -157,11 +157,12 @@ def cmd_init(_args: argparse.Namespace) -> None:
         f"FAIL_THRESHOLD={settings.FAIL_THRESHOLD}",
         f"CHECK_INTERVAL_SECONDS={settings.CHECK_INTERVAL_SECONDS}",
         f"RECOVERY_GRACE_SECONDS={settings.RECOVERY_GRACE_SECONDS}",
+        f"SIGNAL_SAMPLE_SECONDS={settings.SIGNAL_SAMPLE_SECONDS}",
     ]
     settings.ENV_FILE.write_text("\n".join(lines) + "\n")
     settings.ENV_FILE.chmod(0o600)
-    print(f"Login OK. Saved to {settings.ENV_FILE}.")
-    print("Try `airtel status`, or just run `airtel` to start background monitoring.")
+    ui.ok(f"Login OK. Saved to [dim]{settings.ENV_FILE}[/dim]")
+    ui.info_line("Try [bold]airtel status[/bold], or run [bold]airtel[/bold] to start background monitoring.")
 
 
 def cmd_status() -> None:
