@@ -41,6 +41,8 @@ COMMANDS = [
     ("airtel logs", "Follow the watchdog log (-n N for history)"),
     ("airtel foreground", "Run the watchdog attached, for debugging"),
     ("airtel init", "Set the router address and credentials"),
+    ("airtel billing plan|customer|payments|run", "Pay-by-SMS access control (see docs/billing.md)"),
+    ("airtel probe <cmd>", "Read-only: print the raw JSON for a router command id"),
 ]
 
 
