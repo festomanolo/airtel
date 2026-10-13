@@ -391,35 +391,72 @@ def cmd_stop(_args: argparse.Namespace) -> None:
     settings.PID_FILE.unlink(missing_ok=True)
 
 
-def cmd_logs() -> None:
+def _style_log_line(line: str) -> Text:
+    t = Text(line.rstrip("\n"))
+    t.highlight_words(["[WARNING]"], "yellow")
+    t.highlight_words(["[ERROR]"], "bold red")
+    t.highlight_words(["[INFO]"], "dim")
+    if "recovered" in line:
+        t.stylize("green")
+    return t
+
+
+def cmd_logs(args: argparse.Namespace) -> None:
     if not settings.LOG_FILE.exists():
-        sys.exit("No log file yet — the daemon hasn't run.")
-    subprocess.run(["tail", "-f", str(settings.LOG_FILE)])
+        ui.fail("No log file yet — the watchdog hasn't run.")
+        sys.exit(1)
+    try:
+        with open(settings.LOG_FILE) as fh:
+            for line in deque(fh, maxlen=args.n):
+                console.print(_style_log_line(line))
+            while True:
+                line = fh.readline()
+                if line:
+                    console.print(_style_log_line(line))
+                else:
+                    time.sleep(0.5)
+    except KeyboardInterrupt:
+        pass
+
+
+# ----------------------------------------------------------------------- main
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="airtel", add_help=False)
+    sub = p.add_subparsers(dest="action")
+    sub.add_parser("start").set_defaults(fn=cmd_start_background)
+    sub.add_parser("stop").set_defaults(fn=cmd_stop)
+    sub.add_parser("foreground").set_defaults(fn=cmd_foreground)
+    sub.add_parser("reconnect").set_defaults(fn=cmd_reconnect)
+    sub.add_parser("reboot").set_defaults(fn=cmd_reboot)
+    sub.add_parser("init").set_defaults(fn=cmd_init)
+
+    st = sub.add_parser("status")
+    st.add_argument("-w", "--watch", action="store_true", help="live-refreshing dashboard")
+    st.add_argument("-i", "--interval", type=float, default=2.0, help="watch refresh seconds")
+    st.add_argument("--json", action="store_true", help="raw router payload")
+    st.set_defaults(fn=cmd_status)
+
+    lg = sub.add_parser("logs")
+    lg.add_argument("-n", type=int, default=30, help="lines of history to show first")
+    lg.set_defaults(fn=cmd_logs)
+    return p
 
 
 def main() -> None:
     args = sys.argv[1:]
-    action = args[0] if args else "start"
-
-    dispatch = {
-        "start": cmd_start_background,
-        "stop": cmd_stop,
-        "foreground": cmd_foreground,
-        "status": cmd_status,
-        "reconnect": cmd_reconnect,
-        "reboot": cmd_reboot,
-        "init": cmd_init,
-        "logs": cmd_logs,
-        "-h": lambda: print(__doc__),
-        "--help": lambda: print(__doc__),
-    }
-
-    fn = dispatch.get(action)
-    if fn is None:
-        print(f"Unknown command: {action}\n")
-        print(__doc__)
-        sys.exit(1)
-    fn()
+    if args and args[0] in ("-h", "--help", "help"):
+        _print_help()
+        return
+    parser = _build_parser()
+    try:
+        ns = parser.parse_args(args or ["start"])
+    except SystemExit:
+        ui.fail(f"Unknown or invalid arguments: {' '.join(args)}")
+        _print_help()
+        sys.exit(2)
+    ns.fn(ns)
 
 
 if __name__ == "__main__":
