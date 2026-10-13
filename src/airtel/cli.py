@@ -328,19 +328,19 @@ def cmd_reconnect(_args: argparse.Namespace) -> None:
 def cmd_reboot(_args: argparse.Namespace) -> None:
     client = _client()
     try:
-        client.login()
-        print("Issuing reboot command...")
-        client.reboot()
-        print("Reboot triggered. Device will be unreachable for ~60-90s.")
+        with console.status("Sending reboot command…", spinner="dots"):
+            client.login()
+            client.reboot()
+        ui.ok("Reboot triggered. The router will be unreachable for ~60-90 s.")
     except (RouterAuthError, RouterAPIError) as e:
-        sys.exit(f"Error: {e}")
+        ui.fail(str(e))
+        sys.exit(1)
     finally:
         client.logout()
 
 
-def cmd_foreground() -> None:
-    if not settings.is_configured():
-        sys.exit("Not configured yet. Run `airtel init` first.")
+def cmd_foreground(_args: argparse.Namespace) -> None:
+    _need_config()
     from .monitor import monitor_loop
 
     try:
