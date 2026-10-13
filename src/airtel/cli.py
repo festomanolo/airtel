@@ -137,13 +137,17 @@ def cmd_init(_args: argparse.Namespace) -> None:
         ui.fail("A password is required.")
         sys.exit(1)
 
-    print("Verifying login against the router before saving...")
     client = RouterClient(base_url=url, username=user, password=password)
     try:
-        client.login()
-        client.logout()
+        with console.status(f"Verifying login at {url}…", spinner="dots"):
+            client.login()
+            client.logout()
     except (RouterAuthError, RouterAPIError) as e:
-        sys.exit(f"Login check failed, nothing saved: {e}")
+        ui.fail(f"Login check failed, nothing saved: {e}")
+        sys.exit(1)
+    except Exception as e:  # noqa: BLE001 - network errors surface as many types
+        ui.fail(f"Could not reach {url}: {e}")
+        sys.exit(1)
 
     lines = [
         f"ROUTER_URL={url}",
