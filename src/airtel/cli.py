@@ -294,13 +294,30 @@ def _status_watch(interval: float) -> None:
         client.logout()
 
 
-def cmd_reconnect() -> None:
+def cmd_reconnect(_args: argparse.Namespace) -> None:
+    from .monitor import ping_rtt
+
     client = _client()
     try:
-        client.login()
-        print("Toggling WAN/cellular connection...")
-        client.reconnect()
-        print("Reconnected.")
+        with console.status("Logging in…", spinner="dots") as st:
+            client.login()
+            st.update("Toggling cellular link…")
+            started = time.monotonic()
+            client.reconnect()
+            st.update("Waiting for the link to come back…")
+            deadline = time.monotonic() + 40
+            back = False
+            while time.monotonic() < deadline:
+                if ping_rtt(settings.PING_TARGET, timeout_s=2) is not None:
+                    back = True
+                    break
+                time.sleep(1)
+        took = ui.human_duration(time.monotonic() - started)
+        if back:
+            ui.ok(f"Link restored in {took}")
+        else:
+            ui.fail(f"Reconnect sent, but {settings.PING_TARGET} still isn't answering after {took}")
+            sys.exit(1)
     except (RouterAuthError, RouterAPIError) as e:
         sys.exit(f"Error: {e}")
     finally:
