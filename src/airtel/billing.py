@@ -199,3 +199,43 @@ class Store:
         self.db.execute("INSERT OR REPLACE INTO sessions VALUES (?,?)", (phone, expires))
         self.db.commit()
         return expires
+
+    def active_phones(self, now: float) -> set[str]:
+        return {r["phone"] for r in self.db.execute("SELECT phone FROM sessions WHERE expires_at>?", (now,))}
+
+    def all_session_phones(self) -> set[str]:
+        return {r["phone"] for r in self.db.execute("SELECT phone FROM sessions")}
+
+
+# ---------------------------------------------------------------- engine
+
+@dataclass
+class TickReport:
+    granted: list[str] = field(default_factory=list)
+    unmatched: list[str] = field(default_factory=list)
+    ignored: int = 0
+    revoked: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+
+def _msg_key(m: dict[str, Any]) -> str:
+    return hashlib.sha256(f"{m.get('sender')}|{m.get('ts')}|{m.get('body')}".encode()).hexdigest()
+
+
+def tick(store: Store, backend: Backend, now: Optional[float] = None,
+         trusted_senders: Iterable[str] = DEFAULT_TRUSTED_SENDERS) -> TickReport:
+    """One pass: ingest new payment SMS, grant paid time, expire old sessions."""
+    now = time.time() if now is None else now
+    rep = TickReport()
+    trusted = {s.upper() for s in trusted_senders}
+
+    for m in backend.inbox():
+        key = _msg_key(m)
+        if store.db.execute("SELECT 1 FROM sms_seen WHERE key=?", (key,)).fetchone():
+            continue
+        store.db.execute("INSERT INTO sms_seen VALUES (?)", (key,))
+        pay = parse_payment(m.get("body", "")) if m.get("sender", "").upper() in trusted else None
+        if not pay:
+            rep.ignored += 1
+            continue
+        if store.db.execute("SELECT 1 FROM payments WHERE txn=?", (pay.txn,)).fetchone():
