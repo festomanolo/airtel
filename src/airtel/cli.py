@@ -443,6 +443,10 @@ def _build_parser() -> argparse.ArgumentParser:
     lg = sub.add_parser("logs")
     lg.add_argument("-n", type=int, default=30, help="lines of history to show first")
     lg.set_defaults(fn=cmd_logs)
+
+    from . import billing_cli
+
+    billing_cli.register(sub)
     return p
 
 
