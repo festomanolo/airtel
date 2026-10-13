@@ -38,3 +38,43 @@ CREATE TABLE IF NOT EXISTS plans (
     name TEXT PRIMARY KEY, price REAL NOT NULL, minutes INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS customers (
     phone TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS devices (
+    mac TEXT PRIMARY KEY, phone TEXT NOT NULL REFERENCES customers(phone));
+CREATE TABLE IF NOT EXISTS payments (
+    txn TEXT PRIMARY KEY, phone TEXT NOT NULL, amount REAL NOT NULL, ts REAL NOT NULL,
+    plan TEXT, status TEXT NOT NULL, raw TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS sessions (
+    phone TEXT PRIMARY KEY, expires_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS sms_seen (key TEXT PRIMARY KEY);
+"""
+
+
+# ---------------------------------------------------------------- parsing
+
+def normalize_phone(raw: str) -> Optional[str]:
+    """Return a Tanzanian number as 255XXXXXXXXX, or None if it doesn't fit."""
+    digits = re.sub(r"\D", "", raw or "")
+    if len(digits) == 10 and digits.startswith("0"):
+        digits = "255" + digits[1:]
+    return digits if len(digits) == 12 and digits.startswith("255") else None
+
+
+def normalize_mac(raw: str) -> str:
+    hexes = re.sub(r"[^0-9a-fA-F]", "", raw or "")
+    if len(hexes) != 12:
+        raise ValueError(f"not a MAC address: {raw!r}")
+    return ":".join(hexes[i:i + 2] for i in range(0, 12, 2)).upper()
+
+
+@dataclass
+class Payment:
+    txn: str
+    phone: str
+    amount: float
+    raw: str
+
+
+def parse_payment(body: str) -> Optional[Payment]:
+    """Extract (txn, payer phone, amount) from a received-money SMS, or None."""
+    low = body.lower()
+    if not any(w in low for w in ("received", "umepokea", "imepokelewa", "deposit", "credited")):
