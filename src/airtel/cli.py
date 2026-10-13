@@ -165,13 +165,131 @@ def cmd_init(_args: argparse.Namespace) -> None:
     ui.info_line("Try [bold]airtel status[/bold], or run [bold]airtel[/bold] to start background monitoring.")
 
 
-def cmd_status() -> None:
+def _series(records: list[dict[str, Any]], key: str) -> list[Optional[float]]:
+    return [r.get(key) for r in records]
+
+
+def _span(records: list[dict[str, Any]]) -> str:
+    if len(records) < 2:
+        return ""
+    return f"last {ui.human_duration(records[-1]['t'] - records[0]['t'])}"
+
+
+def _history_views() -> dict[str, Any]:
+    recs = history.load(since=time.time() - 3600)
+    sigs = [r for r in recs if r.get("k") == "sig"][-60:]
+    pings = [r for r in recs if r.get("k") == "ping"][-60:]
+    return {
+        "signal_series": {m.key: _series(sigs, m.key.lower()) for m in ui.METRICS},
+        "signal_span": _span(sigs),
+        "rtts": _series(pings, "rtt"),
+        "rtt_span": _span(pings),
+    }
+
+
+def cmd_status(args: argparse.Namespace) -> None:
+    if args.json:
+        client = _client()
+        try:
+            client.login()
+            print(json.dumps(client.sys_info(), indent=2))
+        except (RouterAuthError, RouterAPIError) as e:
+            ui.fail(str(e))
+            sys.exit(1)
+        finally:
+            client.logout()
+        return
+
+    if args.watch:
+        return _status_watch(args.interval)
+
     client = _client()
     try:
-        client.login()
-        print(json.dumps(client.sys_info(), indent=2))
+        with console.status("Querying router…", spinner="dots"):
+            client.login()
+            info = client.sys_info()
     except (RouterAuthError, RouterAPIError) as e:
-        sys.exit(f"Error: {e}")
+        ui.fail(str(e))
+        sys.exit(1)
+    except Exception as e:  # noqa: BLE001
+        ui.fail(f"Could not reach {settings.ROUTER_URL}: {e}")
+        sys.exit(1)
+    finally:
+        client.logout()
+
+    views = _history_views()
+    console.print(
+        ui.dashboard(
+            info,
+            daemon=daemon_info(),
+            ping_target=settings.PING_TARGET,
+            footer="Graphs show watchdog history. Use `airtel status --watch` for live throughput.",
+            **views,
+        )
+    )
+
+
+def _status_watch(interval: float) -> None:
+    from .monitor import ping_rtt
+
+    client = _client()
+    keep = 60
+    sig = {m.key: deque(maxlen=keep) for m in ui.METRICS}
+    rtts: deque = deque(maxlen=keep)
+    dl_rates: deque = deque(maxlen=keep)
+    ul_rates: deque = deque(maxlen=keep)
+    counters: deque = deque(maxlen=5)  # (t, dl_kb, ul_kb); router counters tick every few seconds
+    info: dict[str, Any] = {}
+    error: Optional[str] = None
+    start = time.monotonic()
+
+    def render() -> Any:
+        if not info:
+            return Text("Connecting…", style="dim")
+        n = len(rtts)
+        span = f"last {ui.human_duration(n * interval)}" if n > 1 else ""
+        return ui.dashboard(
+            info,
+            daemon=daemon_info(),
+            signal_series=sig,
+            signal_span=span,
+            rtts=list(rtts),
+            rtt_span=span,
+            ping_target=settings.PING_TARGET,
+            dl_rates=list(dl_rates),
+            ul_rates=list(ul_rates),
+            online=rtts[-1] is not None if rtts else None,
+            footer=(f"✗ {error}" if error else f"Refreshing every {interval:g}s · running {ui.human_duration(time.monotonic() - start)} · Ctrl+C to exit"),
+        )
+
+    try:
+        with Live(render(), console=console, screen=True, auto_refresh=False) as live:
+            while True:
+                try:
+                    if not client.session_id:
+                        client.login()
+                    info = client.sys_info()
+                    error = None
+                except (RouterAuthError, RouterAPIError, Exception) as e:  # noqa: BLE001
+                    client.session_id = None
+                    error = f"router: {e}"
+                else:
+                    for m in ui.METRICS:
+                        sig[m.key].append(ui.num(info.get(m.key)))
+                    dl, ul = ui.num(info.get("flow_dl")), ui.num(info.get("flow_ul"))
+                    now = time.monotonic()
+                    if dl is not None and ul is not None:
+                        counters.append((now, dl, ul))
+                        if len(counters) > 1:
+                            t0, d0, u0 = counters[0]
+                            dt = max(now - t0, 1e-6)
+                            dl_rates.append(max((dl - d0) / dt, 0.0))
+                            ul_rates.append(max((ul - u0) / dt, 0.0))
+                rtts.append(ping_rtt(settings.PING_TARGET, timeout_s=2))
+                live.update(render(), refresh=True)
+                time.sleep(interval)
+    except KeyboardInterrupt:
+        pass
     finally:
         client.logout()
 
