@@ -78,3 +78,43 @@ def parse_payment(body: str) -> Optional[Payment]:
     """Extract (txn, payer phone, amount) from a received-money SMS, or None."""
     low = body.lower()
     if not any(w in low for w in ("received", "umepokea", "imepokelewa", "deposit", "credited")):
+        return None
+    amount = AMOUNT_RE.search(body)
+    txn = TXN_RE.search(body)
+    if not (amount and txn):
+        return None
+    phone = next((p for m in PHONE_RE.findall(body) if (p := normalize_phone(m))), None)
+    if not phone:
+        return None
+    return Payment(txn=txn.group(1).upper(), phone=phone,
+                   amount=float(amount.group(1).replace(",", "")), raw=body)
+
+
+# ---------------------------------------------------------------- backends
+
+class Backend(Protocol):
+    def inbox(self) -> list[dict[str, Any]]: ...   # [{sender, body, ts}]
+    def allow(self, mac: str) -> None: ...
+    def revoke(self, mac: str) -> None: ...
+
+
+class BackendUnverified(RuntimeError):
+    """The router request for this action hasn't been captured yet."""
+
+
+class DryRunBackend:
+    """In-memory backend: records what would happen. Used for tests/`--dry-run`."""
+
+    def __init__(self, messages: Iterable[dict[str, Any]] = ()) -> None:
+        self.messages = list(messages)
+        self.allowed: set[str] = set()
+
+    def inbox(self) -> list[dict[str, Any]]:
+        return list(self.messages)
+
+    def allow(self, mac: str) -> None:
+        self.allowed.add(mac)
+
+    def revoke(self, mac: str) -> None:
+        self.allowed.discard(mac)
+
