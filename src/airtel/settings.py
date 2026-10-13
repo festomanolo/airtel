@@ -20,6 +20,7 @@ CONFIG_DIR = Path(os.environ.get("AIRTEL_CONFIG_DIR", Path.home() / ".config" / 
 ENV_FILE = CONFIG_DIR / ".env"
 PID_FILE = CONFIG_DIR / "monitor.pid"
 LOG_FILE = CONFIG_DIR / "monitor.log"
+HISTORY_FILE = CONFIG_DIR / "history.jsonl"
 
 if ENV_FILE.exists():
     load_dotenv(ENV_FILE)
