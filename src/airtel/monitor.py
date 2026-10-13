@@ -77,9 +77,11 @@ def recover(client: RouterClient, escalate: bool) -> None:
     try:
         if escalate:
             log.warning("Fast reconnect didn't clear the outage last time; rebooting.")
+            history.append({"k": "event", "what": "reboot"})
             client.reboot()
         else:
             log.warning("Heavy traffic lockup detected. Triggering fast reconnect...")
+            history.append({"k": "event", "what": "reconnect"})
             client.reconnect()
     finally:
         client.logout()
