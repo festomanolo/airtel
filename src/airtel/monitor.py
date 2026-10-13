@@ -106,8 +106,20 @@ def monitor_loop() -> None:
         settings.FAIL_THRESHOLD,
     )
 
+    history.trim()
+    last_signal_sample = 0.0
+
     while True:
-        if check_connection(settings.PING_TARGET):
+        rtt = ping_rtt(settings.PING_TARGET)
+        history.append({"k": "ping", "rtt": rtt})
+        if (
+            settings.SIGNAL_SAMPLE_SECONDS
+            and time.monotonic() - last_signal_sample >= settings.SIGNAL_SAMPLE_SECONDS
+        ):
+            last_signal_sample = time.monotonic()
+            sample_signal(client)
+
+        if rtt is not None:
             if consecutive_failures:
                 log.info("Connection recovered.")
             consecutive_failures = 0
