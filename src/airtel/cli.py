@@ -114,10 +114,22 @@ def _normalize_url(url: str) -> str:
     return url
 
 
-def cmd_init() -> None:
+# ------------------------------------------------------------------- commands
+
+
+def cmd_init(_args: argparse.Namespace) -> None:
     settings.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    print("Set up your router connection (press Enter to accept the default).")
-    raw_url = input(f"Router URL or IP [{settings.ROUTER_URL}]: ").strip()
+    console.print(
+        Panel(
+            "Enter your router's details. Press Enter to accept the value in [brackets].\n"
+            "The login is verified before anything is saved.",
+            title=Text("airtel setup", style="bold"),
+            title_align="left",
+            border_style="grey50",
+            box=box.ROUNDED,
+        )
+    )
+    raw_url = console.input(f"[bold]Router URL or IP[/bold] [dim]\\[{settings.ROUTER_URL}][/dim]: ").strip()
     url = _normalize_url(raw_url) if raw_url else settings.ROUTER_URL
     user = input(f"Username [{settings.ROUTER_USER}]: ").strip() or settings.ROUTER_USER
     password = getpass.getpass("Password: ").strip()
