@@ -20,6 +20,7 @@ CONFIG_DIR = Path(os.environ.get("AIRTEL_CONFIG_DIR", Path.home() / ".config" / 
 ENV_FILE = CONFIG_DIR / ".env"
 PID_FILE = CONFIG_DIR / "monitor.pid"
 LOG_FILE = CONFIG_DIR / "monitor.log"
+HISTORY_FILE = CONFIG_DIR / "history.jsonl"
 
 if ENV_FILE.exists():
     load_dotenv(ENV_FILE)
@@ -34,6 +35,10 @@ PING_TARGET = os.getenv("PING_TARGET", "8.8.8.8")
 FAIL_THRESHOLD = int(os.getenv("FAIL_THRESHOLD", "3"))
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "10"))
 RECOVERY_GRACE_SECONDS = int(os.getenv("RECOVERY_GRACE_SECONDS", "45"))
+# How often the daemon logs in to record signal history for `airtel status`.
+# Each sample is a short login/logout, which can bump an open web-UI session;
+# set to 0 to disable signal sampling (ping history is unaffected).
+SIGNAL_SAMPLE_SECONDS = int(os.getenv("SIGNAL_SAMPLE_SECONDS", "60"))
 
 
 def is_configured() -> bool:

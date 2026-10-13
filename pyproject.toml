@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "airtel-router-cli"
-version = "0.1.0"
+version = "0.2.0"
 description = "Background auto-recovery CLI for Tozed/ZLT-style router web UIs (e.g. an Airtel-branded ZLT X25)."
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
     "requests>=2.31",
     "python-dotenv>=1.0",
+    "rich>=13",
 ]
 
 [project.scripts]

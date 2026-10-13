@@ -12,11 +12,13 @@ Normally launched via `airtel` (background) or `airtel foreground`
 or Ctrl+C when running in the foreground.
 """
 import logging
+import re
 import subprocess
 import sys
 import time
+from typing import Optional
 
-from . import settings
+from . import history, settings
 from .router_client import RouterAPIError, RouterAuthError, RouterClient
 
 logging.basicConfig(
@@ -27,18 +29,47 @@ logging.basicConfig(
 log = logging.getLogger("monitor")
 
 
-def check_connection(target: str, timeout_s: int = 3) -> bool:
+_RTT_RE = re.compile(r"time[=<]([\d.]+)")
+
+
+def ping_rtt(target: str, timeout_s: int = 3) -> Optional[float]:
+    """Round-trip time in ms, or None if the ping failed."""
     try:
-        subprocess.run(
+        out = subprocess.run(
             ["ping", "-c", "1", "-W" if sys.platform != "darwin" else "-t", str(timeout_s), target],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
             check=True,
             timeout=timeout_s + 2,
-        )
-        return True
+        ).stdout
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return False
+        return None
+    m = _RTT_RE.search(out)
+    return float(m.group(1)) if m else 0.0
+
+
+def check_connection(target: str, timeout_s: int = 3) -> bool:
+    return ping_rtt(target, timeout_s) is not None
+
+
+def sample_signal(client: RouterClient) -> None:
+    """Record one signal reading to the history file; never raises."""
+    try:
+        client.login()
+        try:
+            info = client.sys_info()
+        finally:
+            client.logout()
+    except Exception as e:  # noqa: BLE001 - sampling must never kill the daemon
+        log.debug("Signal sample failed: %s", e)
+        return
+    rec = {"k": "sig"}
+    for key in ("RSRP", "SINR", "RSRQ", "RSSI"):
+        try:
+            rec[key.lower()] = float(info.get(key, ""))
+        except ValueError:
+            pass
+    history.append(rec)
 
 
 def recover(client: RouterClient, escalate: bool) -> None:
@@ -46,9 +77,11 @@ def recover(client: RouterClient, escalate: bool) -> None:
     try:
         if escalate:
             log.warning("Fast reconnect didn't clear the outage last time; rebooting.")
+            history.append({"k": "event", "what": "reboot"})
             client.reboot()
         else:
             log.warning("Heavy traffic lockup detected. Triggering fast reconnect...")
+            history.append({"k": "event", "what": "reconnect"})
             client.reconnect()
     finally:
         client.logout()
@@ -73,8 +106,20 @@ def monitor_loop() -> None:
         settings.FAIL_THRESHOLD,
     )
 
+    history.trim()
+    last_signal_sample = 0.0
+
     while True:
-        if check_connection(settings.PING_TARGET):
+        rtt = ping_rtt(settings.PING_TARGET)
+        history.append({"k": "ping", "rtt": rtt})
+        if (
+            settings.SIGNAL_SAMPLE_SECONDS
+            and time.monotonic() - last_signal_sample >= settings.SIGNAL_SAMPLE_SECONDS
+        ):
+            last_signal_sample = time.monotonic()
+            sample_signal(client)
+
+        if rtt is not None:
             if consecutive_failures:
                 log.info("Connection recovered.")
             consecutive_failures = 0

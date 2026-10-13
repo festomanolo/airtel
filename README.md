@@ -40,12 +40,19 @@ airtel              # start the background health-monitor daemon
 airtel stop          # stop it
 airtel logs           # tail its log
 
-airtel status         # one-off: live signal/connection JSON
+airtel status         # dashboard: signal gauges, latency + trend graphs, traffic
+airtel status --watch # live-refreshing dashboard (Ctrl+C to exit)
+airtel status --json  # raw router payload
 airtel reconnect      # one-off: fast WAN/cellular toggle (~10s)
 airtel reboot          # one-off: full reboot (~60-90s)
 
 airtel foreground       # run the monitor attached, for debugging
 ```
+
+The watchdog records ping latency and signal readings to
+`~/.config/airtel/history.jsonl` (6 h retention) so `airtel status` can draw
+trends without being left open. Signal sampling logs in to the router once a
+minute; set `SIGNAL_SAMPLE_SECONDS=0` in the config to disable it.
 
 Typing `airtel` with no arguments is the main entry point: it launches the
 health-check daemon detached from your terminal and returns immediately.

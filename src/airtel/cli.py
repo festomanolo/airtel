@@ -2,34 +2,74 @@
 """airtel — background auto-recovery for Tozed/ZLT-style router web UIs
 (e.g. an Airtel-branded ZLT X25).
 
-Usage:
-    airtel              Start the health-monitor daemon in the background
-    airtel stop         Stop the background daemon
-    airtel foreground   Run the monitor attached, for debugging (Ctrl+C to stop)
-    airtel status       Print live router status as JSON
-    airtel reconnect    One-off fast WAN/cellular toggle (~10s)
-    airtel reboot       One-off full device reboot (~60-90s)
-    airtel init         Interactive setup: your router's IP, username, password
-    airtel logs         Tail the background daemon's log
+Run `airtel help` for the command list.
 
 Config is per-user, not per-project: `airtel init` writes to
 ~/.config/airtel/.env (override the directory with AIRTEL_CONFIG_DIR).
 Nothing here ships with anyone's real router password baked in.
 """
+import argparse
 import getpass
 import json
 import os
 import signal
 import subprocess
 import sys
+import time
+from collections import deque
+from typing import Any, Optional
 
-from . import settings
+from rich import box
+from rich.live import Live
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+
+from . import history, settings, ui
 from .router_client import RouterAPIError, RouterAuthError, RouterClient
+
+console = ui.console
+
+COMMANDS = [
+    ("airtel", "Start the watchdog in the background"),
+    ("airtel status", "Signal, cell, latency and traffic dashboard"),
+    ("airtel status --watch", "Live dashboard with moving graphs (Ctrl+C to exit)"),
+    ("airtel status --json", "Raw router payload as JSON"),
+    ("airtel reconnect", "Toggle the cellular link (~10 s)"),
+    ("airtel reboot", "Reboot the router (~60-90 s)"),
+    ("airtel stop", "Stop the background watchdog"),
+    ("airtel logs", "Follow the watchdog log (-n N for history)"),
+    ("airtel foreground", "Run the watchdog attached, for debugging"),
+    ("airtel init", "Set the router address and credentials"),
+]
+
+
+def _print_help() -> None:
+    t = Table.grid(padding=(0, 3))
+    t.add_column(style="bold cyan", no_wrap=True)
+    t.add_column()
+    for cmd, desc in COMMANDS:
+        t.add_row(cmd, desc)
+    console.print(
+        Panel(
+            t,
+            title=Text("airtel · router watchdog for Tozed/ZLT (Airtel X25)", style="bold"),
+            title_align="left",
+            border_style="grey50",
+            box=box.ROUNDED,
+            padding=(1, 2),
+        )
+    )
+
+
+def _need_config() -> None:
+    if not settings.is_configured():
+        ui.fail("Not configured yet. Run [bold]airtel init[/bold] first.")
+        sys.exit(1)
 
 
 def _client() -> RouterClient:
-    if not settings.is_configured():
-        sys.exit("Not configured yet. Run `airtel init` first.")
+    _need_config()
     return RouterClient(
         base_url=settings.ROUTER_URL,
         username=settings.ROUTER_USER,
@@ -45,6 +85,26 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _read_pid() -> Optional[int]:
+    try:
+        return int(settings.PID_FILE.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def daemon_info() -> dict[str, Any]:
+    pid = _read_pid()
+    if pid is None or not _pid_alive(pid):
+        return {"running": False}
+    events = [r for r in history.load(since=time.time() - 6 * 3600) if r.get("k") == "event"]
+    return {
+        "running": True,
+        "pid": pid,
+        "uptime": time.time() - settings.PID_FILE.stat().st_mtime,
+        "last_event": events[-1] if events else None,
+    }
+
+
 def _normalize_url(url: str) -> str:
     url = url.strip().rstrip("/")
     if not url:
@@ -54,23 +114,40 @@ def _normalize_url(url: str) -> str:
     return url
 
 
-def cmd_init() -> None:
+# ------------------------------------------------------------------- commands
+
+
+def cmd_init(_args: argparse.Namespace) -> None:
     settings.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    print("Set up your router connection (press Enter to accept the default).")
-    raw_url = input(f"Router URL or IP [{settings.ROUTER_URL}]: ").strip()
+    console.print(
+        Panel(
+            "Enter your router's details. Press Enter to accept the value in [brackets].\n"
+            "The login is verified before anything is saved.",
+            title=Text("airtel setup", style="bold"),
+            title_align="left",
+            border_style="grey50",
+            box=box.ROUNDED,
+        )
+    )
+    raw_url = console.input(f"[bold]Router URL or IP[/bold] [dim]\\[{settings.ROUTER_URL}][/dim]: ").strip()
     url = _normalize_url(raw_url) if raw_url else settings.ROUTER_URL
-    user = input(f"Username [{settings.ROUTER_USER}]: ").strip() or settings.ROUTER_USER
+    user = console.input(f"[bold]Username[/bold] [dim]\\[{settings.ROUTER_USER}][/dim]: ").strip() or settings.ROUTER_USER
     password = getpass.getpass("Password: ").strip()
     if not password:
-        sys.exit("A password is required.")
+        ui.fail("A password is required.")
+        sys.exit(1)
 
-    print("Verifying login against the router before saving...")
     client = RouterClient(base_url=url, username=user, password=password)
     try:
-        client.login()
-        client.logout()
+        with console.status(f"Verifying login at {url}…", spinner="dots"):
+            client.login()
+            client.logout()
     except (RouterAuthError, RouterAPIError) as e:
-        sys.exit(f"Login check failed, nothing saved: {e}")
+        ui.fail(f"Login check failed, nothing saved: {e}")
+        sys.exit(1)
+    except Exception as e:  # noqa: BLE001 - network errors surface as many types
+        ui.fail(f"Could not reach {url}: {e}")
+        sys.exit(1)
 
     lines = [
         f"ROUTER_URL={url}",
@@ -80,53 +157,190 @@ def cmd_init() -> None:
         f"FAIL_THRESHOLD={settings.FAIL_THRESHOLD}",
         f"CHECK_INTERVAL_SECONDS={settings.CHECK_INTERVAL_SECONDS}",
         f"RECOVERY_GRACE_SECONDS={settings.RECOVERY_GRACE_SECONDS}",
+        f"SIGNAL_SAMPLE_SECONDS={settings.SIGNAL_SAMPLE_SECONDS}",
     ]
     settings.ENV_FILE.write_text("\n".join(lines) + "\n")
     settings.ENV_FILE.chmod(0o600)
-    print(f"Login OK. Saved to {settings.ENV_FILE}.")
-    print("Try `airtel status`, or just run `airtel` to start background monitoring.")
+    ui.ok(f"Login OK. Saved to [dim]{settings.ENV_FILE}[/dim]")
+    ui.info_line("Try [bold]airtel status[/bold], or run [bold]airtel[/bold] to start background monitoring.")
 
 
-def cmd_status() -> None:
+def _series(records: list[dict[str, Any]], key: str) -> list[Optional[float]]:
+    return [r.get(key) for r in records]
+
+
+def _span(records: list[dict[str, Any]]) -> str:
+    if len(records) < 2:
+        return ""
+    return f"last {ui.human_duration(records[-1]['t'] - records[0]['t'])}"
+
+
+def _history_views() -> dict[str, Any]:
+    recs = history.load(since=time.time() - 3600)
+    sigs = [r for r in recs if r.get("k") == "sig"][-60:]
+    pings = [r for r in recs if r.get("k") == "ping"][-60:]
+    return {
+        "signal_series": {m.key: _series(sigs, m.key.lower()) for m in ui.METRICS},
+        "signal_span": _span(sigs),
+        "rtts": _series(pings, "rtt"),
+        "rtt_span": _span(pings),
+    }
+
+
+def cmd_status(args: argparse.Namespace) -> None:
+    if args.json:
+        client = _client()
+        try:
+            client.login()
+            print(json.dumps(client.sys_info(), indent=2))
+        except (RouterAuthError, RouterAPIError) as e:
+            ui.fail(str(e))
+            sys.exit(1)
+        finally:
+            client.logout()
+        return
+
+    if args.watch:
+        return _status_watch(args.interval)
+
     client = _client()
     try:
-        client.login()
-        print(json.dumps(client.sys_info(), indent=2))
+        with console.status("Querying router…", spinner="dots"):
+            client.login()
+            info = client.sys_info()
     except (RouterAuthError, RouterAPIError) as e:
-        sys.exit(f"Error: {e}")
+        ui.fail(str(e))
+        sys.exit(1)
+    except Exception as e:  # noqa: BLE001
+        ui.fail(f"Could not reach {settings.ROUTER_URL}: {e}")
+        sys.exit(1)
+    finally:
+        client.logout()
+
+    views = _history_views()
+    console.print(
+        ui.dashboard(
+            info,
+            daemon=daemon_info(),
+            ping_target=settings.PING_TARGET,
+            footer="Graphs show watchdog history. Use `airtel status --watch` for live throughput.",
+            **views,
+        )
+    )
+
+
+def _status_watch(interval: float) -> None:
+    from .monitor import ping_rtt
+
+    client = _client()
+    keep = 60
+    sig = {m.key: deque(maxlen=keep) for m in ui.METRICS}
+    rtts: deque = deque(maxlen=keep)
+    dl_rates: deque = deque(maxlen=keep)
+    ul_rates: deque = deque(maxlen=keep)
+    counters: deque = deque(maxlen=5)  # (t, dl_kb, ul_kb); router counters tick every few seconds
+    info: dict[str, Any] = {}
+    error: Optional[str] = None
+    start = time.monotonic()
+
+    def render() -> Any:
+        if not info:
+            return Text("Connecting…", style="dim")
+        n = len(rtts)
+        span = f"last {ui.human_duration(n * interval)}" if n > 1 else ""
+        return ui.dashboard(
+            info,
+            daemon=daemon_info(),
+            signal_series=sig,
+            signal_span=span,
+            rtts=list(rtts),
+            rtt_span=span,
+            ping_target=settings.PING_TARGET,
+            dl_rates=list(dl_rates),
+            ul_rates=list(ul_rates),
+            online=rtts[-1] is not None if rtts else None,
+            footer=(f"✗ {error}" if error else f"Refreshing every {interval:g}s · running {ui.human_duration(time.monotonic() - start)} · Ctrl+C to exit"),
+        )
+
+    try:
+        with Live(render(), console=console, screen=True, auto_refresh=False) as live:
+            while True:
+                try:
+                    if not client.session_id:
+                        client.login()
+                    info = client.sys_info()
+                    error = None
+                except (RouterAuthError, RouterAPIError, Exception) as e:  # noqa: BLE001
+                    client.session_id = None
+                    error = f"router: {e}"
+                else:
+                    for m in ui.METRICS:
+                        sig[m.key].append(ui.num(info.get(m.key)))
+                    dl, ul = ui.num(info.get("flow_dl")), ui.num(info.get("flow_ul"))
+                    now = time.monotonic()
+                    if dl is not None and ul is not None:
+                        counters.append((now, dl, ul))
+                        if len(counters) > 1:
+                            t0, d0, u0 = counters[0]
+                            dt = max(now - t0, 1e-6)
+                            dl_rates.append(max((dl - d0) / dt, 0.0))
+                            ul_rates.append(max((ul - u0) / dt, 0.0))
+                rtts.append(ping_rtt(settings.PING_TARGET, timeout_s=2))
+                live.update(render(), refresh=True)
+                time.sleep(interval)
+    except KeyboardInterrupt:
+        pass
     finally:
         client.logout()
 
 
-def cmd_reconnect() -> None:
+def cmd_reconnect(_args: argparse.Namespace) -> None:
+    from .monitor import ping_rtt
+
     client = _client()
     try:
-        client.login()
-        print("Toggling WAN/cellular connection...")
-        client.reconnect()
-        print("Reconnected.")
+        with console.status("Logging in…", spinner="dots") as st:
+            client.login()
+            st.update("Toggling cellular link…")
+            started = time.monotonic()
+            client.reconnect()
+            st.update("Waiting for the link to come back…")
+            deadline = time.monotonic() + 40
+            back = False
+            while time.monotonic() < deadline:
+                if ping_rtt(settings.PING_TARGET, timeout_s=2) is not None:
+                    back = True
+                    break
+                time.sleep(1)
+        took = ui.human_duration(time.monotonic() - started)
+        if back:
+            ui.ok(f"Link restored in {took}")
+        else:
+            ui.fail(f"Reconnect sent, but {settings.PING_TARGET} still isn't answering after {took}")
+            sys.exit(1)
     except (RouterAuthError, RouterAPIError) as e:
-        sys.exit(f"Error: {e}")
+        ui.fail(str(e))
+        sys.exit(1)
     finally:
         client.logout()
 
 
-def cmd_reboot() -> None:
+def cmd_reboot(_args: argparse.Namespace) -> None:
     client = _client()
     try:
-        client.login()
-        print("Issuing reboot command...")
-        client.reboot()
-        print("Reboot triggered. Device will be unreachable for ~60-90s.")
+        with console.status("Sending reboot command…", spinner="dots"):
+            client.login()
+            client.reboot()
+        ui.ok("Reboot triggered. The router will be unreachable for ~60-90 s.")
     except (RouterAuthError, RouterAPIError) as e:
-        sys.exit(f"Error: {e}")
+        ui.fail(str(e))
+        sys.exit(1)
     finally:
         client.logout()
 
 
-def cmd_foreground() -> None:
-    if not settings.is_configured():
-        sys.exit("Not configured yet. Run `airtel init` first.")
+def cmd_foreground(_args: argparse.Namespace) -> None:
+    _need_config()
     from .monitor import monitor_loop
 
     try:
@@ -135,17 +349,16 @@ def cmd_foreground() -> None:
         pass
 
 
-def cmd_start_background() -> None:
-    if not settings.is_configured():
-        sys.exit("Not configured yet. Run `airtel init` first.")
+def cmd_start_background(_args: argparse.Namespace) -> None:
+    _need_config()
     settings.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
-    if settings.PID_FILE.exists():
-        pid = int(settings.PID_FILE.read_text().strip())
+    pid = _read_pid()
+    if pid is not None:
         if _pid_alive(pid):
-            print(f"Already running (pid {pid}). Run `airtel stop` first to restart it.")
+            ui.info_line(f"Already running (pid {pid}). Run [bold]airtel stop[/bold] first to restart it.")
             return
-        settings.PID_FILE.unlink()
+        settings.PID_FILE.unlink(missing_ok=True)
 
     log_fh = open(settings.LOG_FILE, "a")
     proc = subprocess.Popen(
@@ -157,53 +370,93 @@ def cmd_start_background() -> None:
         close_fds=True,
     )
     settings.PID_FILE.write_text(str(proc.pid))
-    print(f"Started in background (pid {proc.pid}).")
-    print(f"Logs: airtel logs   (or tail -f {settings.LOG_FILE})")
-    print("Stop with: airtel stop")
+    ui.ok(f"Watchdog started in the background [dim](pid {proc.pid})[/dim]")
+    ui.info_line(
+        f"Pinging [bold]{settings.PING_TARGET}[/bold] every {settings.CHECK_INTERVAL_SECONDS}s; "
+        f"recovers after {settings.FAIL_THRESHOLD} misses."
+    )
+    console.print("  [dim]airtel status · airtel logs · airtel stop[/dim]")
 
 
-def cmd_stop() -> None:
-    if not settings.PID_FILE.exists():
-        print("Not running.")
+def cmd_stop(_args: argparse.Namespace) -> None:
+    pid = _read_pid()
+    if pid is None:
+        ui.info_line("Not running.")
         return
-    pid = int(settings.PID_FILE.read_text().strip())
     if _pid_alive(pid):
         os.kill(pid, signal.SIGTERM)
-        print(f"Stopped (pid {pid}).")
+        ui.ok(f"Watchdog stopped [dim](pid {pid})[/dim]")
     else:
-        print("Not running (stale pid file cleared).")
-    settings.PID_FILE.unlink()
+        ui.info_line("Not running (stale pid file cleared).")
+    settings.PID_FILE.unlink(missing_ok=True)
 
 
-def cmd_logs() -> None:
+def _style_log_line(line: str) -> Text:
+    t = Text(line.rstrip("\n"))
+    t.highlight_words(["[WARNING]"], "yellow")
+    t.highlight_words(["[ERROR]"], "bold red")
+    t.highlight_words(["[INFO]"], "dim")
+    if "recovered" in line:
+        t.stylize("green")
+    return t
+
+
+def cmd_logs(args: argparse.Namespace) -> None:
     if not settings.LOG_FILE.exists():
-        sys.exit("No log file yet — the daemon hasn't run.")
-    subprocess.run(["tail", "-f", str(settings.LOG_FILE)])
+        ui.fail("No log file yet — the watchdog hasn't run.")
+        sys.exit(1)
+    try:
+        with open(settings.LOG_FILE) as fh:
+            for line in deque(fh, maxlen=args.n):
+                console.print(_style_log_line(line))
+            while True:
+                line = fh.readline()
+                if line:
+                    console.print(_style_log_line(line))
+                else:
+                    time.sleep(0.5)
+    except KeyboardInterrupt:
+        pass
+
+
+# ----------------------------------------------------------------------- main
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="airtel", add_help=False)
+    sub = p.add_subparsers(dest="action")
+    sub.add_parser("start").set_defaults(fn=cmd_start_background)
+    sub.add_parser("stop").set_defaults(fn=cmd_stop)
+    sub.add_parser("foreground").set_defaults(fn=cmd_foreground)
+    sub.add_parser("reconnect").set_defaults(fn=cmd_reconnect)
+    sub.add_parser("reboot").set_defaults(fn=cmd_reboot)
+    sub.add_parser("init").set_defaults(fn=cmd_init)
+
+    st = sub.add_parser("status")
+    st.add_argument("-w", "--watch", action="store_true", help="live-refreshing dashboard")
+    st.add_argument("-i", "--interval", type=float, default=2.0, help="watch refresh seconds")
+    st.add_argument("--json", action="store_true", help="raw router payload")
+    st.set_defaults(fn=cmd_status)
+
+    lg = sub.add_parser("logs")
+    lg.add_argument("-n", type=int, default=30, help="lines of history to show first")
+    lg.set_defaults(fn=cmd_logs)
+    return p
 
 
 def main() -> None:
     args = sys.argv[1:]
-    action = args[0] if args else "start"
-
-    dispatch = {
-        "start": cmd_start_background,
-        "stop": cmd_stop,
-        "foreground": cmd_foreground,
-        "status": cmd_status,
-        "reconnect": cmd_reconnect,
-        "reboot": cmd_reboot,
-        "init": cmd_init,
-        "logs": cmd_logs,
-        "-h": lambda: print(__doc__),
-        "--help": lambda: print(__doc__),
-    }
-
-    fn = dispatch.get(action)
-    if fn is None:
-        print(f"Unknown command: {action}\n")
-        print(__doc__)
-        sys.exit(1)
-    fn()
+    if args and args[0] in ("-h", "--help", "help"):
+        _print_help()
+        return
+    parser = _build_parser()
+    try:
+        ns = parser.parse_args(args or ["start"])
+    except SystemExit:
+        ui.fail(f"Unknown or invalid arguments: {' '.join(args)}")
+        _print_help()
+        sys.exit(2)
+    ns.fn(ns)
 
 
 if __name__ == "__main__":
